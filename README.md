@@ -29,12 +29,18 @@ git clone https://github.com/CodeVision3000/Onedrive-Doctor.git `
 & "$env:USERPROFILE\.claude\skills\onedrive-doctor\scripts\install-schedule.ps1"
 ```
 
-The install registers a task named **OneDrive Doctor** that runs every 15
-minutes and at logon, as the current user with an interactive logon type. That
-matters: the doctor reads `HKCU` and talks to the OneDrive client in the user's
-own session, and neither works from `SYSTEM`.
+The install registers two tasks:
 
-Remove it with `install-schedule.ps1 -Uninstall`.
+- **OneDrive Doctor** — every 15 minutes and at logon, the fast pass, with
+  `-Fix`
+- **OneDrive Doctor Deep** — once a day (`-DeepAt`, default 05:30), the
+  expensive sweeps, read-only
+
+Both run as the current user with an interactive logon type. That matters: the
+doctor reads `HKCU` and talks to the OneDrive client in the user's own session,
+and neither works from `SYSTEM`.
+
+Remove both with `install-schedule.ps1 -Uninstall`.
 
 Cloning into `.claude\skills\` also registers it as a Claude Code skill. The
 script is standalone, so skip that path if you only want the scheduled task.
@@ -56,7 +62,7 @@ OneDrive doctor - HEALTHY
   report: C:\Users\<you>\AppData\Local\onedrive-doctor\last-report.json
 ```
 
-Exit codes: `0` healthy, `1` findings nothing fixed, `2` repairs applied,
+Exit codes: `0` healthy or advisory-only, `1` errors needing action, `2` repairs applied,
 `3` the doctor itself failed.
 
 Every run writes `last-report.json` and appends one line to `doctor.log`, both
@@ -68,26 +74,45 @@ under `%LOCALAPPDATA%\onedrive-doctor`.
 |---|---|
 | `not-running` | the client process is gone |
 | `engine-stale` | the process is alive but the sync engine stopped logging |
+| `outlook-data-file` | a `.pst`/`.ost` inside a synced folder — Outlook holds these open, so they can **never** sync |
 | `client-missing` | OneDrive is not installed |
 | `mount-missing` | a registered library folder no longer exists |
 | `library-error` | the shell reports an error state on a library |
 | `low-disk` | free space below the threshold; sync stalls as a disk fills |
+| `too-many-items` | synced item count over `-MaxItems`; the usual cause of permanent high CPU |
+| `bounce-suppressed` | a restart was warranted but withheld, because at this item count it would cost hours |
 | `files-invalid-character` | `< > : " \| ? *` in a filename |
 | `files-trailing-space-or-dot` | a name ending in a space or dot |
 | `files-path-too-long` | a full path near the limit |
 | `files-conflict-copy` | a `-COMPUTERNAME` conflict copy |
 | `reset-requested` | the client has flagged itself for a reset |
-| `excel-open`, `scan-truncated` | context, not faults |
+| `outlook-data-file-cloud` | a data file that is cloud-only — syncs fine, blocks nothing, leave it |
+| `excel-open`, `scan-truncated`, `no-deep-scan`, `deep-scan-stale` | context, not faults |
+
+### Fast checks vs deep checks
+
+Process, heartbeat, library status, disk and Outlook data files in their usual
+locations take seconds and run every time. Item counts and full filename sweeps
+take **minutes** on a large machine and compete with OneDrive for the same
+disk, so they run only under `-Deep`, cache their results, and the fast pass
+re-reports the cache. The installer schedules them separately.
 
 ## The fix ladder
 
 **Tier 1 — automatic.** Client not running, so start it with `/background`.
 
-**Tier 2 — automatic, with hysteresis.** The sync engine writes a log every
+**Tier 2 — automatic, with two guards.** The sync engine writes a log every
 minute or two even when idle, so silence past `-StaleMinutes` means a wedge.
 The doctor requires **two consecutive** stale checks before acting, then issues
 `/shutdown` and restarts. Without that hysteresis a single long upload would get
 a restart dropped on top of it.
+
+The second guard matters more. A restart discards scan progress, and on a
+machine with a large item count that scan takes **hours** — so an automatic
+bounce inflicts far more damage than the wedge it is guessing at. Above
+`-MaxItems` the doctor refuses to restart and reports `bounce-suppressed`
+instead. A repair that is correct on a normal machine is not automatically
+correct on a big one.
 
 **Tier 3 — never automatic.** `/reset` re-syncs every attached library, which on
 a machine with large team sites is hours of re-download. Renaming files OneDrive
@@ -103,6 +128,8 @@ trigger a multi-hour resync is more dangerous than the problem it fixes.
 | Switch | Default | Purpose |
 |---|---|---|
 | `-Fix` | off | apply tier 1-2 repairs |
+| `-Deep` | off | run item counts and full filename/PST sweeps, then cache them |
+| `-MaxItems` | 300000 | item count above which sync degrades and auto-restart is withheld |
 | `-StaleMinutes` | 15 | heartbeat silence before a wedge is called |
 | `-MinFreeGB` | 10 | low-disk threshold |
 | `-PathWarn` | 380 | path length that triggers a warning |
@@ -133,6 +160,28 @@ filter is deliberate: the `Common`, `ListSync` and `OD4` log folders keep
 writing while a wedged sync engine stays silent, so watching all `.odl` files
 would mask the exact failure the check exists to catch. The logs themselves are
 obfuscated binary and are never parsed — the timestamp alone is the signal.
+
+**Outlook data files** are detected as a *configuration* problem, not a symptom.
+OneDrive reports "this file is in use" only in its tray flyout, which no API
+exposes. But the cause is deterministic: Outlook holds `.pst`/`.ost` open for
+its whole session, so one inside a sync root can never finish uploading.
+Finding the file is reliable where reading the error is not. Files that are
+cloud-only placeholders are reported separately as harmless — they already
+synced, and moving one out would force a full download first.
+
+### Two things that are not progress signals
+
+Both of these were tried, and both are wrong:
+
+- **`LastDAUEventTimestamp_*` in the account registry key.** DAU is Daily Active
+  Usage. These fire once per day as telemetry, so they sit frozen for hours
+  while uploads complete normally. Anything built on them reports a healthy
+  client as hung.
+- **Sustained high CPU.** On a machine near or past the item ceiling, 100% of a
+  core for an hour is the steady state, not a fault.
+
+Treat "is it making progress" as unanswerable from the outside, and detect
+causes instead: dead process, silent log, blocking file, item count.
 
 ## Limitations
 

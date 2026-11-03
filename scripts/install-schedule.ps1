@@ -1,26 +1,39 @@
 <#
 .SYNOPSIS
-  Registers the "OneDrive Doctor" scheduled task: every 15 minutes, plus at logon.
+  Registers the OneDrive Doctor scheduled tasks.
 .DESCRIPTION
-  Runs as the current user with an interactive logon type - the doctor reads HKCU
-  and talks to the same-session OneDrive client, neither of which works from SYSTEM.
-  No elevation required.
+  Two tasks, because the checks have very different costs:
 
-  Run with -Uninstall to remove the task.
+    "OneDrive Doctor"       every 15 min + at logon - the fast pass (seconds)
+    "OneDrive Doctor Deep"  once a day              - item counts and full
+                                                      filename/PST sweeps,
+                                                      which take minutes and
+                                                      compete with OneDrive
+                                                      for disk
+
+  Both run as the current user with an interactive logon type: the doctor reads
+  HKCU and talks to the OneDrive client in the user's own session, and neither
+  works from SYSTEM. No elevation required.
+
+  Run with -Uninstall to remove both.
 #>
 [CmdletBinding()]
 param(
     [switch]$Uninstall,
-    [int]$IntervalMinutes = 15
+    [int]$IntervalMinutes = 15,
+    [string]$DeepAt = '05:30'
 )
 
 $ErrorActionPreference = 'Stop'
-$TaskName = 'OneDrive Doctor'
-$Script   = Join-Path $PSScriptRoot 'onedrive-doctor.ps1'
+$Fast   = 'OneDrive Doctor'
+$DeepT  = 'OneDrive Doctor Deep'
+$Script = Join-Path $PSScriptRoot 'onedrive-doctor.ps1'
 
 if ($Uninstall) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Host "Removed scheduled task '$TaskName'."
+    foreach ($n in $Fast, $DeepT) {
+        Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "Removed scheduled task '$n'."
+    }
     return
 }
 
@@ -28,27 +41,45 @@ if (-not (Test-Path $Script)) { throw "Doctor script not found at $Script" }
 $Pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
 if (-not $Pwsh) { $Pwsh = (Get-Command powershell).Source }
 
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType Interactive -RunLevel Limited
 
-$action = New-ScheduledTaskAction -Execute $Pwsh -Argument (
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Fix -Quiet -ScanSecsPerLib 8' -f $Script)
+function New-DoctorAction {
+    param([string]$ExtraArgs)
+    New-ScheduledTaskAction -Execute $Pwsh -Argument (
+        '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" {1}' -f $Script, $ExtraArgs)
+}
 
-$triggers = @(
+# --- fast pass -------------------------------------------------------------
+Unregister-ScheduledTask -TaskName $Fast -Confirm:$false -ErrorAction SilentlyContinue
+
+$fastTriggers = @(
     (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)),
     (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)
 )
-
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType Interactive -RunLevel Limited
-
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+$fastSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew -StartWhenAvailable
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
-    -Principal $principal -Settings $settings `
-    -Description 'Detects OneDrive sync problems and applies safe repairs (tier 1-2 only). Never resets.' | Out-Null
+Register-ScheduledTask -TaskName $Fast -Action (New-DoctorAction '-Fix -Quiet') `
+    -Trigger $fastTriggers -Principal $principal -Settings $fastSettings `
+    -Description 'Fast OneDrive health check. Applies tier 1-2 repairs only; never resets.' | Out-Null
+Write-Host "Registered '$Fast' - every $IntervalMinutes minutes and at logon."
 
-Write-Host "Registered '$TaskName' - every $IntervalMinutes minutes and at logon."
+# --- daily deep scan -------------------------------------------------------
+Unregister-ScheduledTask -TaskName $DeepT -Confirm:$false -ErrorAction SilentlyContinue
+
+# Deep runs are read-only on purpose: no -Fix. They walk every library, so they
+# are given a wide time limit and are skipped on battery.
+$deepSettings = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew -StartWhenAvailable
+
+Register-ScheduledTask -TaskName $DeepT -Action (New-DoctorAction '-Deep -Quiet') `
+    -Trigger (New-ScheduledTaskTrigger -Daily -At $DeepAt) `
+    -Principal $principal -Settings $deepSettings `
+    -Description 'Daily deep OneDrive scan: item counts, filename problems, Outlook data files. Read-only.' | Out-Null
+Write-Host "Registered '$DeepT' - daily at $DeepAt (read-only)."
+
+Write-Host ""
 Write-Host "Reports: $env:LOCALAPPDATA\onedrive-doctor\last-report.json"
-Write-Host "Check:   Get-ScheduledTaskInfo -TaskName '$TaskName'"
+Write-Host "Check:   Get-ScheduledTaskInfo -TaskName '$Fast'"

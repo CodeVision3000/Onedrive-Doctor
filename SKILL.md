@@ -11,10 +11,25 @@ those.
 
 ## How it runs
 
-A scheduled task (`OneDrive Doctor`) runs the script every 15 minutes with
-`-Fix`, so tier 1-2 repairs happen without anyone present. This skill is the
-escalation layer: read what the task found, explain it, and own the tier 3
-decisions the task is deliberately not allowed to make.
+Two scheduled tasks. `OneDrive Doctor` runs the fast pass every 15 minutes with
+`-Fix`, so tier 1-2 repairs happen without anyone present. `OneDrive Doctor
+Deep` runs once a day, read-only, for the checks that take minutes (item
+counts, full filename and Outlook-data-file sweeps) and caches them for the fast
+pass to re-report.
+
+This skill is the escalation layer: read what the tasks found, explain it, and
+own the tier 3 decisions they are deliberately not allowed to make.
+
+## Before diagnosing: two traps
+
+1. **A spinning sync icon is not evidence of a hang.** Restarting the client
+   forces a full re-scan; on a large machine that runs for hours and looks
+   identical to a wedge. If OneDrive was restarted recently, that is the first
+   explanation to rule out, including when Claude did the restarting.
+2. **There is no reliable transfer-progress signal.** `LastDAUEventTimestamp_*`
+   is daily telemetry, not a counter, and sustained high CPU is normal above the
+   item ceiling. Ask the user what the tray flyout says instead of inferring
+   progress from samples minutes apart.
 
 ## Step 1 - read the last report
 
@@ -30,7 +45,7 @@ Trend over time: `Get-Content "$env:LOCALAPPDATA\onedrive-doctor\doctor.log" -Ta
 & "$env:USERPROFILE\.claude\skills\onedrive-doctor\scripts\onedrive-doctor.ps1"
 ```
 
-Detect-only. Add `-Fix` to apply tier 1-2. Exit codes: `0` healthy, `1` findings
+Detect-only. Add `-Fix` to apply tier 1-2. Exit codes: `0` healthy or advisory-only, `1` errors
 not fixed, `2` repairs applied, `3` the doctor itself failed.
 
 Useful switches: `-StaleMinutes`, `-MinFreeGB`, `-PathWarn`, `-ScanHours`,
@@ -42,7 +57,10 @@ scan was truncated and you need full coverage of a specific library).
 | Finding | Tier | Handling |
 |---|---|---|
 | `not-running` | 1 | auto: `OneDrive.exe /background` |
-| `engine-stale` | 2 | auto after two consecutive stale checks: `/shutdown` then `/background` |
+| `engine-stale` | 2 | auto after two consecutive stale checks, **unless** over `-MaxItems` |
+| `bounce-suppressed` | 3 | a restart was warranted but withheld: it would cost hours here |
+| `outlook-data-file` | 3 | **a .pst/.ost in a synced folder - can never sync.** Move it out |
+| `too-many-items` | 3 | over the item ceiling; reduce scope with Choose folders |
 | `client-missing` | 3 | OneDrive is not installed - needs IT |
 | `mount-missing` | 3 | a synced library folder is gone |
 | `library-error` | 3 | the shell reports an error state on a library |
