@@ -38,7 +38,10 @@ The install registers two tasks:
 
 Both run as the current user with an interactive logon type. That matters: the
 doctor reads `HKCU` and talks to the OneDrive client in the user's own session,
-and neither works from `SYSTEM`.
+and neither works from `SYSTEM`. They start through `wscript.exe` and
+`scripts/run-hidden.vbs`, which run `pwsh` with no window and pass its exit code
+back to Task Scheduler: `pwsh` started straight from such a task opens a
+PowerShell window on screen every 15 minutes.
 
 Remove both with `install-schedule.ps1 -Uninstall`.
 
@@ -202,6 +205,7 @@ purpose.
 ```
 scripts/onedrive-doctor.ps1     detection and tier 1-2 repair
 scripts/install-schedule.ps1    registers/removes the scheduled task
+scripts/run-hidden.vbs          starts the tasks' pwsh with no window
 SKILL.md                        Claude Code skill: triage, tier 3 escalation
 ```
 
