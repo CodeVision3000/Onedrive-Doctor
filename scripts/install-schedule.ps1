@@ -42,7 +42,10 @@ if ($Uninstall) {
 
 if (-not (Test-Path $Script)) { throw "Doctor script not found at $Script" }
 if (-not (Test-Path $Hidden)) { throw "Hidden launcher not found at $Hidden" }
-$Pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+# Store PowerShell: use its app alias, which survives updates. Get-Command can return the
+# versioned package folder instead, which the Store deletes on update, and the tasks stop launching.
+$Alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe'
+$Pwsh = if (Test-Path $Alias) { $Alias } else { (Get-Command pwsh -ErrorAction SilentlyContinue).Source }
 if (-not $Pwsh) { $Pwsh = (Get-Command powershell).Source }
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
